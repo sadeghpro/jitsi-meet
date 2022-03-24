@@ -327,7 +327,7 @@ module.exports = (_env, argv) => {
                     contextRegExp: /moment$/
                 })
             ],
-            performance: getPerformanceHints(perfHintOptions, 500 * 1024)
+            performance: getPerformanceHints(perfHintOptions, 550 * 1024)
         }),
         Object.assign({}, config, {
             entry: {
