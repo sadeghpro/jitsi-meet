@@ -196,7 +196,7 @@ export default {
     },
 
     lobbyListContent: {
-        height: '20%'
+        height: '16%'
     },
 
     lobbyListDescription: {
@@ -216,8 +216,16 @@ export default {
         width: '100%'
     },
 
+    notLocalModeratorContainer: {
+        height: '100%'
+    },
+
     meetingListContainer: {
-        height: '60%'
+        height: '58%'
+    },
+
+    meetingListFullContainer: {
+        height: '82%'
     },
 
     meetingListDescription: {

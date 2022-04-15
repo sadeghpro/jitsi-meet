@@ -7,9 +7,11 @@ import React, { Component } from 'react';
 
 import { createScreenSharingIssueEvent, sendAnalytics } from '../../../analytics';
 import { Avatar } from '../../../base/avatar';
+import { getSourceNameSignalingFeatureFlag } from '../../../base/config';
 import { isMobileBrowser } from '../../../base/environment/utils';
 import { MEDIA_TYPE, VideoTrack } from '../../../base/media';
 import {
+    getLocalParticipant,
     getParticipantByIdOrUndefined,
     hasRaisedHand,
     pinParticipant
@@ -21,13 +23,15 @@ import {
     getLocalAudioTrack,
     getLocalVideoTrack,
     getTrackByMediaTypeAndParticipant,
+    getFakeScreenshareParticipantTrack,
     updateLastTrackVideoMediaEvent
 } from '../../../base/tracks';
-import { getVideoObjectPosition } from '../../../face-centering/functions';
+import { getVideoObjectPosition } from '../../../face-landmarks/functions';
 import { hideGif, showGif } from '../../../gifs/actions';
 import { getGifDisplayMode, getGifForParticipant } from '../../../gifs/functions';
 import { PresenceLabel } from '../../../presence-status';
 import { getCurrentLayout, LAYOUTS } from '../../../video-layout';
+import { togglePinStageParticipant } from '../../actions';
 import {
     DISPLAY_MODE_TO_CLASS_NAME,
     DISPLAY_VIDEO,
@@ -36,11 +40,15 @@ import {
 } from '../../constants';
 import {
     computeDisplayModeFromInput,
+    getActiveParticipantsIds,
     getDisplayModeInput,
     isVideoPlayable,
-    showGridInVerticalView
+    showGridInVerticalView,
+    isStageFilmstripEnabled,
+    shouldDisplayStageFilmstrip
 } from '../../functions';
 
+import FakeScreenShareParticipant from './FakeScreenShareParticipant';
 import ThumbnailAudioIndicator from './ThumbnailAudioIndicator';
 import ThumbnailBottomIndicators from './ThumbnailBottomIndicators';
 import ThumbnailTopIndicators from './ThumbnailTopIndicators';
@@ -109,14 +117,15 @@ export type Props = {|
     _height: number,
 
     /**
+     * Whether or not the participant is displayed on the stage filmstrip.
+     * Used to hide the video from the vertical filmstrip.
+     */
+    _isActiveParticipant: boolean,
+
+    /**
      * Indicates whether the thumbnail should be hidden or not.
      */
     _isHidden: boolean,
-
-    /**
-     * Whether or not there is a pinned participant.
-     */
-    _isAnyParticipantPinned: boolean,
 
     /**
      * Indicates whether audio only mode is enabled.
@@ -127,6 +136,12 @@ export type Props = {|
      * Indicates whether the participant associated with the thumbnail is displayed on the large video.
      */
     _isCurrentlyOnLargeVideo: boolean,
+
+    /**
+     * Indicates whether the participant is a fake screen share participant. This prop is behind the
+     * sourceNameSignaling feature flag.
+     */
+    _isFakeScreenShareParticipant: boolean,
 
     /**
      * Whether we are currently running in a mobile browser.
@@ -174,6 +189,18 @@ export type Props = {|
     _raisedHand: boolean,
 
     /**
+     * Whether or not the stage filmstrip is disabled.
+     */
+    _stageFilmstripDisabled: boolean,
+
+    /**
+     * Whether or not the participants are displayed on stage.
+     * (and not screensharing or shared video; used to determine
+     * whether or not the display the participant video in the vertical filmstrip).
+     */
+    _stageParticipantsVisible: boolean,
+
+    /**
      * The video object position for the participant.
      */
     _videoObjectPosition: string,
@@ -207,6 +234,11 @@ export type Props = {|
      * The ID of the participant related to the thumbnail.
      */
     participantID: ?string,
+
+    /**
+     * Whether the tile is displayed in the stage filmstrip or not.
+     */
+    stageFilmstrip: boolean,
 
     /**
      * Styles that will be set to the Thumbnail's main span element.
@@ -498,6 +530,13 @@ class Thumbnail extends Component<Props, State> {
      * @returns {void}
      */
     _hidePopover() {
+        const { _currentLayout } = this.props;
+
+        if (_currentLayout === LAYOUTS.VERTICAL_FILMSTRIP_VIEW) {
+            this.setState({
+                isHovered: false
+            });
+        }
         this.setState({
             popoverVisible: false
         });
@@ -514,6 +553,7 @@ class Thumbnail extends Component<Props, State> {
             _currentLayout,
             _disableTileEnlargement,
             _height,
+            _isFakeScreenShareParticipant,
             _isHidden,
             _isScreenSharing,
             _participant,
@@ -551,7 +591,7 @@ class Thumbnail extends Component<Props, State> {
             || _disableTileEnlargement
             || _isScreenSharing;
 
-        if (canPlayEventReceived || _participant.local) {
+        if (canPlayEventReceived || _participant.local || _isFakeScreenShareParticipant) {
             videoStyles = {
                 objectFit: doNotStretchVideo ? 'contain' : 'cover'
             };
@@ -596,10 +636,14 @@ class Thumbnail extends Component<Props, State> {
      * @returns {void}
      */
     _onClick() {
-        const { _participant, dispatch } = this.props;
+        const { _participant, dispatch, _stageFilmstripDisabled } = this.props;
         const { id, pinned } = _participant;
 
-        dispatch(pinParticipant(pinned ? null : id));
+        if (_stageFilmstripDisabled) {
+            dispatch(pinParticipant(pinned ? null : id));
+        } else {
+            dispatch(togglePinStageParticipant(id));
+        }
     }
 
     _onMouseEnter: () => void;
@@ -747,7 +791,6 @@ class Thumbnail extends Component<Props, State> {
             _isDominantSpeakerDisabled,
             _participant,
             _currentLayout,
-            _isAnyParticipantPinned,
             _raisedHand,
             classes
         } = this.props;
@@ -758,16 +801,11 @@ class Thumbnail extends Component<Props, State> {
             className += ` ${classes.raisedHand}`;
         }
 
-        if (_currentLayout === LAYOUTS.TILE_VIEW) {
-            if (!_isDominantSpeakerDisabled && _participant?.dominantSpeaker) {
-                className += ` ${classes.activeSpeaker} dominant-speaker`;
-            }
-        } else if (_isAnyParticipantPinned) {
-            if (_participant?.pinned) {
-                className += ` videoContainerFocused ${classes.activeSpeaker}`;
-            }
-        } else if (!_isDominantSpeakerDisabled && _participant?.dominantSpeaker) {
+        if (!_isDominantSpeakerDisabled && _participant?.dominantSpeaker) {
             className += ` ${classes.activeSpeaker} dominant-speaker`;
+        }
+        if (_currentLayout !== LAYOUTS.TILE_VIEW && _participant?.pinned) {
+            className += ' videoContainerFocused';
         }
 
         return className;
@@ -808,10 +846,7 @@ class Thumbnail extends Component<Props, State> {
         const { _gifSrc, classes } = this.props;
 
         return _gifSrc && (
-            <div
-                className = { classes.gif }
-                onMouseEnter = { this._onGifMouseEnter }
-                onMouseLeave = { this._onGifMouseLeave }>
+            <div className = { classes.gif }>
                 <img
                     alt = 'GIF'
                     src = { _gifSrc } />
@@ -876,8 +911,9 @@ class Thumbnail extends Component<Props, State> {
             _localFlipX,
             _participant,
             _videoTrack,
+            _gifSrc,
             classes,
-            _gifSrc
+            stageFilmstrip
         } = this.props;
         const { id } = _participant || {};
         const { isHovered, popoverVisible } = this.state;
@@ -914,7 +950,10 @@ class Thumbnail extends Component<Props, State> {
         return (
             <span
                 className = { containerClassName }
-                id = { local ? 'localVideoContainer' : `participant_${id}` }
+                id = { local
+                    ? `localVideoContainer${stageFilmstrip ? '_stage' : ''}`
+                    : `participant_${id}${stageFilmstrip ? '_stage' : ''}`
+                }
                 { ...(_isMobile
                     ? {
                         onTouchEnd: this._onTouchEnd,
@@ -977,6 +1016,12 @@ class Thumbnail extends Component<Props, State> {
                     className = { clsx(classes.borderIndicator,
                     _gifSrc && classes.borderIndicatorOnTop,
                     'active-speaker-indicator') } />
+                {_gifSrc && (
+                    <div
+                        className = { clsx(classes.borderIndicator, classes.borderIndicatorOnTop) }
+                        onMouseEnter = { this._onGifMouseEnter }
+                        onMouseLeave = { this._onGifMouseLeave } />
+                )}
             </span>
         );
     }
@@ -988,7 +1033,7 @@ class Thumbnail extends Component<Props, State> {
      * @returns {ReactElement}
      */
     render() {
-        const { _participant } = this.props;
+        const { _participant, _isFakeScreenShareParticipant } = this.props;
 
         if (!_participant) {
             return null;
@@ -1004,6 +1049,29 @@ class Thumbnail extends Component<Props, State> {
             return this._renderFakeParticipant();
         }
 
+        if (_isFakeScreenShareParticipant) {
+            const { isHovered } = this.state;
+            const { _videoTrack, _isMobile, classes } = this.props;
+
+            return (
+                <FakeScreenShareParticipant
+                    classes = { classes }
+                    containerClassName = { this._getContainerClassName() }
+                    isHovered = { isHovered }
+                    isMobile = { _isMobile }
+                    onClick = { this._onClick }
+                    onMouseEnter = { this._onMouseEnter }
+                    onMouseLeave = { this._onMouseLeave }
+                    onMouseMove = { this._onMouseMove }
+                    onTouchEnd = { this._onTouchEnd }
+                    onTouchMove = { this._onTouchMove }
+                    onTouchStart = { this._onTouchStart }
+                    participantId = { _participant.id }
+                    styles = { this._getStyles() }
+                    videoTrack = { _videoTrack } />
+            );
+        }
+
         return this._renderParticipant();
     }
 }
@@ -1017,17 +1085,25 @@ class Thumbnail extends Component<Props, State> {
  * @returns {Props}
  */
 function _mapStateToProps(state, ownProps): Object {
-    const { participantID } = ownProps;
+    const { participantID, stageFilmstrip } = ownProps;
 
     const participant = getParticipantByIdOrUndefined(state, participantID);
     const id = participant?.id;
     const isLocal = participant?.local ?? true;
     const tracks = state['features/base/tracks'];
-    const _videoTrack = isLocal
-        ? getLocalVideoTrack(tracks) : getTrackByMediaTypeAndParticipant(tracks, MEDIA_TYPE.VIDEO, participantID);
+    const sourceNameSignalingEnabled = getSourceNameSignalingFeatureFlag(state);
+
+    let _videoTrack;
+
+    if (sourceNameSignalingEnabled && participant?.isFakeScreenShareParticipant) {
+        _videoTrack = getFakeScreenshareParticipantTrack(tracks, id);
+    } else {
+        _videoTrack = isLocal
+            ? getLocalVideoTrack(tracks) : getTrackByMediaTypeAndParticipant(tracks, MEDIA_TYPE.VIDEO, participantID);
+    }
     const _audioTrack = isLocal
         ? getLocalAudioTrack(tracks) : getTrackByMediaTypeAndParticipant(tracks, MEDIA_TYPE.AUDIO, participantID);
-    const _currentLayout = getCurrentLayout(state);
+    const _currentLayout = stageFilmstrip ? LAYOUTS.TILE_VIEW : getCurrentLayout(state);
     let size = {};
     let _isMobilePortrait = false;
     const {
@@ -1039,6 +1115,7 @@ function _mapStateToProps(state, ownProps): Object {
     } = state['features/base/config'];
     const { localFlipX } = state['features/base/settings'];
     const _isMobile = isMobileBrowser();
+    const activeParticipants = getActiveParticipantsIds(state);
 
     switch (_currentLayout) {
     case LAYOUTS.VERTICAL_FILMSTRIP_VIEW:
@@ -1079,18 +1156,33 @@ function _mapStateToProps(state, ownProps): Object {
         break;
     }
     case LAYOUTS.TILE_VIEW: {
-        const { width, height } = state['features/filmstrip'].tileViewDimensions.thumbnailSize;
+        const { thumbnailSize } = state['features/filmstrip'].tileViewDimensions;
+        const {
+            stageFilmstripDimensions = {
+                thumbnailSize: {}
+            }
+        } = state['features/filmstrip'];
 
         size = {
-            _width: width,
-            _height: height
+            _width: thumbnailSize?.width,
+            _height: thumbnailSize?.height
         };
+
+        if (stageFilmstrip) {
+            const { width: _width, height: _height } = stageFilmstripDimensions.thumbnailSize;
+
+            size = {
+                _width,
+                _height
+            };
+        }
         break;
     }
     }
 
     const { gifUrl: gifSrc } = getGifForParticipant(state, id);
     const mode = getGifDisplayMode(state);
+    const participantId = isLocal ? getLocalParticipant(state).id : participantID;
 
     return {
         _audioTrack,
@@ -1098,10 +1190,12 @@ function _mapStateToProps(state, ownProps): Object {
         _defaultLocalDisplayName: defaultLocalDisplayName,
         _disableLocalVideoFlip: Boolean(disableLocalVideoFlip),
         _disableTileEnlargement: Boolean(disableTileEnlargement),
+        _isActiveParticipant: activeParticipants.find(pId => pId === participantId),
         _isHidden: isLocal && iAmRecorder && !iAmSipGateway,
         _isAudioOnly: Boolean(state['features/base/audio-only'].enabled),
         _isCurrentlyOnLargeVideo: state['features/large-video']?.participantId === id,
         _isDominantSpeakerDisabled: interfaceConfig.DISABLE_DOMINANT_SPEAKER_INDICATOR,
+        _isFakeScreenShareParticipant: sourceNameSignalingEnabled && participant?.isFakeScreenShareParticipant,
         _isMobile,
         _isMobilePortrait,
         _isScreenSharing: _videoTrack?.videoType === 'desktop',
@@ -1110,6 +1204,8 @@ function _mapStateToProps(state, ownProps): Object {
         _localFlipX: Boolean(localFlipX),
         _participant: participant,
         _raisedHand: hasRaisedHand(participant),
+        _stageFilmstripDisabled: !isStageFilmstripEnabled(state),
+        _stageParticipantsVisible: shouldDisplayStageFilmstrip(state, 1),
         _videoObjectPosition: getVideoObjectPosition(state, participant?.id),
         _videoTrack,
         ...size,
